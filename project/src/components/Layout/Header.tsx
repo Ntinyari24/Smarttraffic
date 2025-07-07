@@ -102,6 +102,7 @@ const Header: React.FC<HeaderProps> = ({ toggleSidebar }) => {
                     src={user.user_metadata.avatar_url}
                     alt="Profile" 
                     className="w-full h-full object-cover"
+                    onError={e => { e.currentTarget.src = '/default-avatar.png'; }}
                   />
                 ) : (
                   <span className="font-semibold">

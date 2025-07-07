@@ -5,6 +5,7 @@ import '@tomtom-international/web-sdk-maps/dist/maps.css';
 import { Download, Car, Bus, Truck, Bike, AlertTriangle, ArrowRight, Loader, Info, MapPin, Crosshair } from 'lucide-react';
 import { getOptimizedRoute } from '../../AI/services';
 import type { OptimizedRoute, VehicleType } from '../../AI/types';
+import { createBrowserRouter } from "react-router-dom";
 
 // Interfaces for our data structures
 interface Location {
@@ -35,6 +36,7 @@ const RouteOptimizer: React.FC = () => {
 
   // Initialize map
   useEffect(() => {
+    if (!mapRef.current) return;
     const apiKey = import.meta.env.VITE_TOMTOM_API_KEY;
     if (!apiKey) {
       console.error("TomTom API key is not configured.");
@@ -129,10 +131,10 @@ const RouteOptimizer: React.FC = () => {
     if (!query || !apiKey) return;
     try {
       // Focus search on Kenya and prioritize locations over streets
-      const response = await services.fuzzySearch({
+      const response = await services.autocomplete({
         key: apiKey,
-        query: `${query}, Nairobi, KE`,
-        entityTypeSet: 'Municipality,MunicipalitySubdivision,Neighbourhood'
+        query:`${query}, Nairobi, KE`,
+        language: 'en-US'
       });
       if (isOrigin) setOriginResults(response.results || []);
       else setDestinationResults(response.results || []);
@@ -186,94 +188,103 @@ const RouteOptimizer: React.FC = () => {
   
   // Calculate and display the optimal route
   const handleFindRoute = async () => {
-    if (!origin?.position?.lat || !origin?.position?.lng || !destination?.position?.lat || !destination?.position?.lng || !mapInstance.current) {
+    if (!origin || !destination) {
       setError('Please select both an origin and a destination.');
       return;
     }
 
-    setIsLoading(true);
-    setError(null);
-    setOptimizedRoute(null);
-    clearMap();
-
     try {
-      const result = await getOptimizedRoute(origin.position, destination.position, vehicleType);
+      setIsLoading(true);
+      setError('');
 
-      if (!result) {
-        setError('Could not find an optimized route. Please try again.');
-        setIsLoading(false);
-        return;
-      }
+      const response = await services.calculateRoute({
+        key: apiKey,
+        locations: [
+          [origin.position.lng, origin.position.lat],
+          [destination.position.lng, destination.position.lat],
+        ],
+        traffic: true,
+        routeType: 'fastest',
+        travelMode: vehicleType,
+      });
 
-      setOptimizedRoute(result);
+      const mainRoute = response.routes[0];
 
-      // Draw the main route on the map
-      const mainRouteGeoJSON = {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'LineString',
-          coordinates: result.mainRoute.geometry.map(p => [p.lng, p.lat]),
+      setOptimizedRoute({
+        aiSummary: `Fastest route from ${origin.name} to ${destination.name} based on real-time traffic.`,
+        mainRoute: {
+          distanceInMeters: mainRoute.summary.lengthInMeters,
+          travelTimeInSeconds: mainRoute.summary.travelTimeInSeconds,
+          trafficDelayInSeconds: mainRoute.summary.trafficDelayInSeconds || 0,
         },
-      };
-
-      mapInstance.current.addSource('route', { type: 'geojson', data: mainRouteGeoJSON as any });
-      mapInstance.current.addLayer({
-        id: 'route',
-        type: 'line',
-        source: 'route',
-        paint: { 'line-color': '#16a34a', 'line-width': 8, 'line-opacity': 0.9 },
+        alternativeRoutes: response.routes.slice(1).map((alt) => ({
+          distanceInMeters: alt.summary.lengthInMeters,
+          travelTimeInSeconds: alt.summary.travelTimeInSeconds,
+        })),
+        incidents: (mainRoute.legs[0]?.points || []).map((p, i) => ({
+          summary: `Incident ${i + 1}`,
+          details: `Traffic incident reported at lat: ${p.lat}, lon: ${p.lng}`,
+          position: { lat: p.lat, lng: p.lng },
+        })),
       });
 
-      // Add markers for origin, destination, and incidents
-      const originMarker = new tt.Marker({ color: '#22c55e' }).setLngLat(origin.position as LngLatLike).addTo(mapInstance.current);
-      const destMarker = new tt.Marker({ color: '#ef4444' }).setLngLat(destination.position as LngLatLike).addTo(mapInstance.current);
-      markers.current = [originMarker, destMarker];
+      // Optionally, add code here to draw the route on the map if needed
 
-      result.incidents.forEach(incident => {
-        const popup = new tt.Popup({ offset: 25 }).setText(incident.summary);
-        const incidentMarker = new tt.Marker({ color: '#f59e0b' })
-          .setLngLat(incident.position as LngLatLike)
-          .setPopup(popup)
-          .addTo(mapInstance.current!);
-        markers.current.push(incidentMarker);
-      });
-
-      // Fit map to bounds
-      const bounds = new tt.LngLatBounds();
-      result.mainRoute.geometry.forEach(point => bounds.extend([point.lng, point.lat]));
-      mapInstance.current.fitBounds(bounds, { padding: 100, duration: 500 });
-      
     } catch (err) {
-      setError('An unexpected error occurred while fetching the route.');
-      console.error(err);
+      console.error('Route calculation failed', err);
+      setError('Could not calculate the route.');
     } finally {
       setIsLoading(false);
     }
   };
+  
 
   // Renders the dropdown for location search results
-  const renderLocationDropdown = (results: any[], onSelect: (location: Location) => void) => (
-    <div className="absolute z-20 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-auto">
-      {results.map((result) => (
-        <button
-          key={result.id}
-          onClick={() => {
-            onSelect({
-              name: result.address.freeformAddress,
-              position: { 
-                lat: result.position.lat, 
-                lng: result.position.lon // Correctly map lon to lng
-              }
-            });
-          }}
-          className="w-full px-4 py-2 text-left hover:bg-green-50 transition-colors"
-        >
-          {result.address.freeformAddress}
-        </button>
-      ))}
-    </div>
-  );
+  // Renders the dropdown for location search results
+const renderLocationDropdown = (results: any[], onSelect: (location: Location) => void) => (
+  <div className="absolute z-20 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-auto">
+    {results.filter(r => r.address).map((result) => (
+      <button
+        key={result.id}
+        onClick={() => {
+          onSelect({
+            name: result.address.freeformAddress,
+            position: { 
+              lat: result.position.lat, 
+              lng: result.position.lon // Fixed: use 'lon' from TomTom response
+            }
+          });
+        }}
+        className="w-full px-4 py-2 text-left hover:bg-green-50 transition-colors"
+      >
+        {result.address.freeformAddress}
+      </button>
+    ))}
+  </div>
+);
+
+// useEffect hooks to fetch suggestions
+useEffect(() => {
+  if (originQuery.trim().length > 2) {
+    services.fuzzySearch({ key: apiKey, query: originQuery, limit: 5 })
+      .then((res) => setOriginResults(res.results))
+      .catch(console.error);
+  } else {
+    setOriginResults([]);
+  }
+}, [originQuery]);
+
+useEffect(() => {
+  if (destinationQuery.trim().length > 2) {
+    services.fuzzySearch({ key: apiKey, query: destinationQuery, limit: 5 })
+      .then((res) => setDestinationResults(res.results))
+      .catch(console.error);
+  } else {
+    setDestinationResults([]);
+  }
+}, [destinationQuery]);
+
+
 
   return (
     <div className="p-4 sm:p-6 font-sans bg-gray-50 min-h-screen">
@@ -316,6 +327,7 @@ const RouteOptimizer: React.FC = () => {
                   {destinationResults.length > 0 && renderLocationDropdown(destinationResults, (loc) => {
                     setDestination(loc);
                     setDestinationQuery(loc.name);
+
                     setDestinationResults([]);
                   })}
                 </div>
@@ -334,8 +346,20 @@ const RouteOptimizer: React.FC = () => {
             </div>
           </div>
 
-          <button onClick={handleFindRoute} disabled={isLoading || !origin || !destination} className="w-full py-3 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5">
-            {isLoading ? <><Loader className="animate-spin mr-3" size={20} /> Calculating...</> : 'Find Optimal Route'}
+
+
+          <button
+            onClick={handleFindRoute}
+            disabled={isLoading || !origin || !destination}
+            className="w-full py-3 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+          >
+            {isLoading ? (
+              <>
+                <Loader className="animate-spin mr-3" size={20} /> Calculating...
+              </>
+            ) : (
+              'Find Optimal Route'
+            )}
           </button>
         </div>
 
